@@ -24,14 +24,15 @@
 ##' @param eps tolerance for window (half width of window).  For `space='x'` is in data units, otherwise is the sample size for half the window, not counting the middle target point.
 ##' @param varyeps applies to `space='n'` and causes a smaller `eps` to be used in strata with fewer than `` observations so as to arrive at three x points
 ##' @param nignore see description, default is to exclude `nignore=10` points on the left and right tails from estimation and plotting
-##' @param xinc increment in x to evaluate stats, default is xlim range/100 for `space='x'`.  For `space='n'` `xinc` defaults to m observations, where m = max(n/200, 1).
+##' @param xinc increment between evaluation targets. For `space='n'`, the automatic increment is `max(floor(n/200), 1)`, capped by the overlap requirement in `rho`. An explicitly supplied `xinc` takes precedence. For `space='x'`, the default is the xlim range divided by 100.
+##' @param rho minimum fraction of observations shared by consecutive full rank windows when `space='n'`, `varyeps=FALSE`, and `xinc` is not supplied. Must be strictly between 0 and 1 and attainable for the specified `eps`. Integer rank spacing can make the achieved overlap greater than `rho`. An explicitly supplied `xinc` takes precedence.
 ##' @param xlim 2-vector of limits to evaluate if `space='x'` (default is `nignore` smallest to `nignore` largest)
 ##' @param times vector of times for evaluating one minus Kaplan-Meier estimates
 ##' @param tunits time units when `times` is given
 ##' @param msmooth set to `'smoothed'` or `'both'` to compute `lowess`-smooth moving estimates. `msmooth='both'` will display both.  `'raw'` will display only the moving statistics.  `msmooth='smoothed'` (the default) will display only he smoothed moving estimates.
 ##' @param tsmooth defaults to the super-smoother `'supsmu'` for after-moving smoothing.  Use `tsmooth='lowess'` to instead use `lowess`.
-##' @param bass the `supsmu` `bass` parameter used to smooth the moving statistics if `tsmooth='supsmu'`.  The default of 8 represents quite heavy smoothing.
-##' @param span the `lowess` `span` used to smooth the moving statistics
+##' @param bass the `supsmu` `bass` adaptive span-selection control parameter used to smooth the moving statistics if `tsmooth='supsmu'`. Has no effect when a positive fixed `span` is supplied. The default of 8 represents quite heavy smoothing.
+##' @param span smoothing fraction passed as `f` to `lowess` and as `span` to `supsmu`. Defaults to 0.1 and applies to the moving estimates.
 ##' @param maxdim passed to `hare`, default is 6
 ##' @param penalty passed to `hare`, default is to use BIC.  Specify 2 to use AIC.
 ##' @param trans transformation to apply to x
@@ -60,7 +61,7 @@ movStats <- function(formula, stat=NULL, discrete=FALSE,
                      times=NULL, tunits='year',
                      msmooth=c('smoothed', 'raw', 'both'),
                      tsmooth=c('supsmu', 'lowess'),
-                     bass=8, span=1/4, maxdim=6, penalty=NULL,
+                     bass=8, span=0.1, maxdim=6, penalty=NULL,
                      trans=function(x) x, itrans=function(x) x,
                      loess=FALSE,
                      ols=FALSE, qreg=FALSE, lrm=FALSE,
@@ -68,7 +69,7 @@ movStats <- function(formula, stat=NULL, discrete=FALSE,
                      lrm_args=NULL, family='logistic',
                      k=5, tau=(1:3)/4, melt=FALSE,
                      data=environment(formula),
-                     pr=c('none', 'kable', 'plain', 'margin')) {
+                     pr=c('none', 'kable', 'plain', 'margin'), rho = 0.5) { # ADDED: rho 
   space   <- match.arg(space)
   msmooth <- match.arg(msmooth)
   movlab  <- 'Moving '
@@ -80,7 +81,13 @@ movStats <- function(formula, stat=NULL, discrete=FALSE,
 
   tsmooth <- match.arg(tsmooth)
   pr      <- match.arg(pr)
-
+  
+  # BEGIN ADDED: Validate rho
+  if(length(rho) != 1L || ! is.numeric(rho) || ! is.finite(rho) || # Require one finite numeric value
+     rho <= 0 || rho >= 1) # Require a positive overlap fraction below one
+    stop('rho must be a single number strictly between 0 and 1') # Reject invalid overlap settings
+  # END ADDED
+  
   if(! requireNamespace('data.table', quietly=TRUE))
     stop('data.table package must be installed')
   if(ols || qreg || lrm)
@@ -219,7 +226,12 @@ movStats <- function(formula, stat=NULL, discrete=FALSE,
              y2   <- y2[i]
              xinc <- Xinc
              if(! length(xinc)) {
-               xinc <- max(floor(n / 200.), 1)
+               # BEGIN ADDED: xinc definition (FROM: xinc <- max(floor(n / 200.), 1))
+               nw <- 2 * floor(eps) + 1 # Actual number of observations in a full rank window
+               xincmax <- floor((1 - rho) * nw + 1e-6) # Preserve attainable integer steps near rounding boundaries
+               if(xincmax < 1) stop('rho is too large for eps') # At least one rank must separate successive targets
+               xinc <- min(max(floor(n / 200.), 1), xincmax) # Cap the existing automatic increment
+               # END ADDED
                info[by, 'xinc'] <- xinc
                }
              xseq <- seq(nignore, n - nignore + 1, by=xinc)
@@ -266,7 +278,7 @@ movStats <- function(formula, stat=NULL, discrete=FALSE,
       for(vv in computed) {
         smoothed <- switch(tsmooth,
                            lowess = lowess(w[, tx], w[[vv]], f   =span),
-                           supsmu = supsmu(w[, tx], w[[vv]], bass=bass))
+                           supsmu = supsmu(w[, tx], w[[vv]], bass=bass, span = span)) #ADDED: span = span. Smoothing span for the supsmu should be predetermined for correlated observation windows. 
         if(length(smoothed$x) < 2)
           stop(paste0('Only 1 x point for stratum ', by,
                       ' with ', n,
