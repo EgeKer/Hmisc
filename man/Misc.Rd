@@ -87,7 +87,7 @@
   the whole curve is returned in a list with objects \code{time} and \code{surv}, and
   there is an option to consider an interval as pertaining to greater than or equal
   to a specific time instead of the traditional greater than.  If the censoring is not
-  right censoring, the more general \code{survfit} is called by \code{km.quick}.  When \code{times} is given, linear extrapolation may be used to estimate survival probabilities for outer times, but the extrapolated values are curtailed to be in (0,1).
+  right censoring, the more general \code{survfit} is called by \code{km.quick}.  When \code{times} is given, linear extrapolation may be used to estimate survival probabilities for outer times, but the extrapolated values are clipped to the closed interval [0,1].
 
 	\code{latexBuild} takes pairs of character strings and produces a
 	single character string containing concatenation of all of them, plus
@@ -205,8 +205,9 @@ inverseFunction(x, y)
 james.stein(y, group)
 keepHattrib(obj)
 km.quick(S, times, q,
-        type = c("kaplan-meier", "fleming-harrington", "fh2"),
-        interval = c(">", ">="), method=c('constant', 'linear'), fapprox=0, n.risk=FALSE)
+         type = c("kaplan-meier", "fleming-harrington", "fh2"), interval = c(">", ">="), 
+         method = c("constant", "linear"), fapprox = 0, n.risk = FALSE, 
+         tail.method = c("last-points", "last-events"), diagnostics = FALSE)
 latexBuild(\dots, insert, sep='')
 lm.fit.qr.bare(x, y, tolerance, intercept=TRUE, xpxi=FALSE, singzero=FALSE)
 matxv(a, b, kint=1, bmat=FALSE)
@@ -276,7 +277,7 @@ xless(x, \dots, title)
   \item{recent}{an integer telling \code{getLatestSource} to get the
 	\code{recent} most recently modified files from the package}
   \item{round}{set to \code{TRUE} to round converted values}
-  \item{S}{a \code{\link[survival]{Surv}} object}
+  \item{S}{A \code{\link[survival]{Surv}} object. Observations with missing survival data are removed. An error is raised if no observations remain.}
   \item{se}{vector of standard errors}
   \item{sep}{a single character string specifying the delimiter.  For
 		\code{latexBuild} the default is \code{""}.}
@@ -323,6 +324,119 @@ xless(x, \dots, title)
 		character strings containing LaTeX code or a zero-length object to
 		ignore, and even-numbered elements representing LaTeX left
 		parenthesis, left brace, or left bracket, or environment name.}
+  \item{tail.method}{
+    Method used to determine the right extrapolation slope. The default, \code{"last-points"}, uses the last 
+    two coordinates retained by \code{approxExtrap} after duplicate removal and sorting.
+    With \code{"last-events"}, the slope is calculated from the Kaplan--Meier survival estimates 
+    immediately after the last two distinct event times. 
+    Extrapolation starts strictly after the final observed time, including censoring times.
+    This option requires \code{times}, right-censored data, \code{type = "kaplan-meier"}, and \code{interval = ">"}.
+  }
+  \item{diagnostics}{
+    Logical. If \code{TRUE}, attach extrapolation information to the result as the \code{"extrapolation"} attribute.
+    Requires \code{times}. 
+    The information describes extrapolation distances and clipping; it does not quantify statistical uncertainty.
+  }
+}
+
+\details{
+  For \code{km.quick}, \code{tail.method = "last-events"} uses the last two distinct event times 
+  to determine the right extrapolation slope. Let these times be \eqn{u < v}, and let
+  \eqn{\hat S(u)} and \eqn{\hat S(v)} be the Kaplan--Meier survival estimates immediately after the events at those times.
+  The slope is
+  \deqn{
+    m = \frac{\hat S(v) - \hat S(u)}{v-u}.
+  }
+
+  Let \eqn{\tau} be the final observed time, including censoring times. 
+  For a requested time \eqn{t > \tau}, the unbounded extrapolated value is
+  \deqn{
+    \hat S(\tau) + m(t-\tau).
+  }
+  Thus, the event times determine the slope, while the final observation determines the extrapolation boundary and anchor.
+  This option does not change interpolation within follow-up.
+  Extrapolation remains linear even when
+  \code{method = "constant"} is used for interpolation.
+
+  If there are fewer than two distinct event times, the event-based slope is unavailable. 
+  Requested values beyond the final observed time are returned as \code{NA}, and a warning is issued if any such values are requested.
+  This policy also applies when the observed survival estimate has already reached zero.
+
+  Extrapolated values on either side are clipped to the closed interval [0, 1].
+  Clipping does not provide evidence that the extrapolated values are accurate.
+
+  Linear continuation beyond observed follow-up is an additional modeling assumption. 
+  Closely spaced final event times can produce a steep slope and rapid clipping to zero. 
+  The numerical checks of this implementation do not establish improved calibration, reduced bias, or uncertainty coverage.
+
+  The diagnostics describe extrapolation distances and clipping; they are not confidence intervals or measures of reliability.
+}
+\value{
+  For \code{km.quick}, when \code{times} is supplied, the result is a numeric vector of survival estimates at those times.
+
+  With \code{diagnostics = TRUE}, this vector has an
+  \code{"extrapolation"} attribute containing:
+  \describe{
+    \item{\code{points}}{
+      The diagnostic data frame described in
+      \code{\link{approxExtrap}}, with an additional
+      \code{x.ratio} column.
+
+      For right extrapolation using \code{"last-events"},
+      \code{x.ratio} is the distance beyond the final observed time divided by the gap between the two slope-defining
+      event times. It is zero for coordinates within the retained range and \code{NA} otherwise, including left
+      extrapolation and unavailable event gaps.
+    }
+    \item{\code{tail}}{
+      A list describing the event-based slope and boundary when \code{tail.method = "last-events"}, 
+      even when no requested time requires extrapolation. It is \code{NULL} for \code{"last-points"}.
+    }
+  }
+
+  The \code{tail} list contains:
+  \describe{
+    \item{\code{method}}{The selected tail method.}
+    \item{\code{status}}{
+      \code{"last_two_event_times"} when two event times are
+      available, or \code{"insufficient_event_times"} otherwise.
+      This indicates slope availability, not statistical validation.
+    }
+    \item{\code{slope}}{
+      The event-based slope, or \code{NA} when unavailable.
+    }
+    \item{\code{slope.points}}{
+      A data frame with \code{time} and \code{survival} columns
+      containing the final zero, one, or two distinct event
+      times and their post-event survival estimates.
+    }
+    \item{\code{event.gap}}{
+      The difference between the two slope-defining event times,
+      or \code{NA} when fewer than two are available.
+    }
+    \item{\code{last.event.time}}{
+      The final event time, or \code{NA} if there are no events.
+    }
+    \item{\code{boundary.time}}{
+      The final observed time, including censoring times.
+    }
+    \item{\code{boundary.survival}}{
+      The survival estimate at the final observed time.
+    }
+    \item{\code{time.since.last.event}}{
+      The final observed time minus the final event time,
+      or \code{NA} if there are no events.
+    }
+  }
+
+  With \code{n.risk = TRUE}, an additional \code{"n.risk"}
+  attribute contains a list with \code{time} and \code{n.risk}
+  components.
+
+  When both \code{times} and \code{q} are omitted,
+  \code{km.quick} returns a list with \code{time} and
+  \code{surv} components. When only \code{times} is omitted,
+  it returns the minimum fitted coordinate whose survival
+  estimate is at most \code{q}, or \code{Inf} if none exists.
 }
 \author{Frank Harrell and Charles Dupont}
 \examples{
