@@ -110,14 +110,30 @@ stepfun.eval <- function(x, y, xout, type=c("left","right"))
 
 
 km.quick <- function(S, times, q, type=c('kaplan-meier', 'fleming-harrington', 'fh2'),
-                     interval=c('>', '>='), method=c('constant', 'linear'), fapprox=0, n.risk=FALSE)
+                     interval=c('>', '>='), method=c('constant', 'linear'), fapprox=0, n.risk=FALSE, tail.method = c("last-points", "last-events"), diagnostics = FALSE)
 {
   sRequire('survival')
   type     <- match.arg(type)
   interval <- match.arg(interval)
   method   <- match.arg(method)
-
+  
+  #ADDDED BEGIN:
+  tail.method <- match.arg(tail.method)
+  event.tail <- tail.method == "last-events"
+  
+  if(event.tail &&
+     (missing(times) ||
+      attr(S, "type") != "right" ||
+      type != "kaplan-meier" ||
+      interval != ">"))
+    stop("last-events requires times, right-censored KM, and interval='>'")
+  
+  if(diagnostics && missing(times))
+    stop("diagnostics requires times")
+  #ADDED END
+  
   S <- S[! is.na(S), ]
+  if(!nrow(S)) stop("No non-missing survival observations")
   stratvar <- factor(rep(1, nrow(S)))
   f <- if(attr(S, 'type') == 'right')
     survival::survfitKM(stratvar, S, se.fit=FALSE, conf.type='none', type=type)
@@ -136,8 +152,77 @@ km.quick <- function(S, times, q, type=c('kaplan-meier', 'fleming-harrington', '
     if(missing(times)) res <- min(tt[ss <= q])
     else {
       if(interval == '>=') {tt <- f$time; ss <- ss[-length(ss)]}
-      res <- approxExtrap(tt, ss, xout=times,
-                          method=method, f=fapprox, curtail=c(0,1))$y
+      
+      #ADDED BEGIN:
+      m <- tail.info <- NULL
+      event.gap <- NA_real_
+      
+      if(event.tail) {
+        j <- tail(which(f$n.event > 0), 2L)
+        last <- which.max(f$time)
+        tau <- f$time[last]
+        last.event <- if(length(j)) f$time[j[length(j)]] else NA_real_
+        m <- NA_real_
+        
+        if(length(j) == 2L) {
+          event.gap <- diff(f$time[j])
+          if(!is.finite(event.gap) || event.gap <= 0)
+            stop("Slope-defining event times must be finite and distinct")
+          m <- diff(f$surv[j]) / event.gap
+        }
+        
+        tail.info <- list(
+          method = tail.method,
+          status = if(length(j) == 2L) "last_two_event_times"
+          else "insufficient_event_times",
+          slope = m,
+          slope.points = data.frame(time=f$time[j], survival=f$surv[j]),
+          event.gap = event.gap,
+          last.event.time = last.event,
+          boundary.time = tau,
+          boundary.survival = f$surv[last],
+          time.since.last.event = tau - last.event
+        )
+      }
+      
+      a <- approxExtrap(
+        tt, ss,
+        xout = times,
+        method = method,
+        f = fapprox,
+        curtail = c(0, 1),
+        right.slope = m,
+        diagnostics = diagnostics
+      )
+      
+      res <- a$y
+      
+      if(event.tail && is.na(m) && any(times > tau))
+        warning(
+          "Right-tail slope unavailable: fewer than two distinct event times",
+          call. = FALSE
+        )
+      
+      if(diagnostics) {
+        d <- a$extrapolation
+        
+        d$x.ratio <- rep(NA_real_, nrow(d))
+        d$x.ratio[!d$extrapolated] <- 0
+        
+        if(event.tail && is.finite(event.gap)) {
+          ir <- d$side == "right"
+          d$x.ratio[ir] <- d$x.distance[ir] / event.gap
+        }
+        
+        attr(res, "extrapolation") <- list(
+          points = d,
+          tail = tail.info
+        )
+      }
+      #ADDED END
+      #OLD CODE:
+      # res <- approxExtrap(tt, ss, xout=times,
+      #                     method=method, f=fapprox, curtail=c(0,1))$y
     }
   }
 if(n.risk) attr(res, 'n.risk') <- nr
@@ -946,8 +1031,19 @@ if(FALSE) {
 }
 
 approxExtrap <- function(x, y, xout, method='linear', n=50, rule=2,
-                         f=0, ties='ordered', curtail=NULL, na.rm=FALSE)
+                         f=0, ties='ordered', curtail=NULL, na.rm=FALSE, 
+                         right.slope=NULL, diagnostics=FALSE)
 {
+  #ADDED BEGIN:
+  if(!is.null(right.slope) &&
+     (!is.numeric(right.slope) ||
+      length(right.slope) != 1L ||
+      is.nan(right.slope) ||
+      (!is.na(right.slope) && !is.finite(right.slope))))
+    stop("right.slope must be NULL, a finite number, or NA_real_")
+  
+  #ADDED END
+  
   ## Linear interpolation using approx, with linear extrapolation
   ## beyond the data
   if(is.list(x)) {
@@ -972,23 +1068,113 @@ approxExtrap <- function(x, y, xout, method='linear', n=50, rule=2,
 
   w <- approx(x, y, xout=xout, method=method, n=n,
               rule=2, f=f, ties=ties)$y
-
+  
+  #ADDED BEGIN:
   r <- range(x)
-  d <- xout < r[1]
-  if(any(is.na(d)))
-    stop('NAs not allowed in xout')
-
-  if(any(d))
-    w[d] <- (y[2]-y[1])/(x[2]-x[1])*(xout[d]-x[1])+y[1]
-
-  d <- xout > r[2]
-  n <- length(y)
-  if(any(d))
-    w[d] <- (y[n]-y[n-1])/(x[n]-x[n-1])*(xout[d]-x[n-1])+y[n-1]
-
-  if(length(curtail) == 2)
-    w[d] <- pmax(curtail[1], pmin(w[d], curtail[2]))
-  list(x=xout, y=w)
+  left  <- xout < r[1]
+  right <- xout > r[2]
+  
+  if(anyNA(c(left, right)))
+    stop("NAs not allowed in xout or retained x")
+  
+  ny <- length(y)
+  left.slope <- used.right.slope <- NA_real_
+  
+  if(any(left)) {
+    if(ny < 2L)
+      stop("Left extrapolation needs two distinct coordinates")
+    
+    left.slope <- (y[2] - y[1]) / (x[2] - x[1])
+    w[left] <- y[1] + left.slope * (xout[left] - x[1])
+  }
+  
+  if(any(right)) {
+    if(is.null(right.slope)) {
+      # Existing slope rule and arithmetic.
+      if(ny < 2L)
+        stop("Default right extrapolation needs two distinct coordinates")
+      
+      used.right.slope <-
+        (y[ny] - y[ny - 1L]) / (x[ny] - x[ny - 1L])
+      
+      w[right] <- y[ny - 1L] +
+        used.right.slope * (xout[right] - x[ny - 1L])
+      
+    } else {
+      # Supplied slope; anchor at the final retained coordinate.
+      used.right.slope <- right.slope
+      
+      w[right] <- y[ny] +
+        right.slope * (xout[right] - x[ny])
+    }
+  }
+  
+  # Preserve the unbounded result before clipping.
+  raw <- w
+  
+  clip <- left | right
+  
+  if(length(curtail) == 2L)
+    w[clip] <- pmax(curtail[1], pmin(w[clip], curtail[2]))
+  
+  ans <- list(x = xout, y = w)
+  
+  if(diagnostics) {
+    outside <- left | right
+    
+    anchor.x <- anchor.y <- slope <- rep(NA_real_, length(xout))
+    
+    anchor.x[left]  <- x[1]
+    anchor.y[left]  <- y[1]
+    anchor.x[right] <- x[ny]
+    anchor.y[right] <- y[ny]
+    
+    slope[left]  <- left.slope
+    slope[right] <- used.right.slope
+    
+    dx <- dy.raw <- dy <- numeric(length(xout))
+    
+    dx[outside]     <- xout[outside] - anchor.x[outside]
+    dy.raw[outside] <- raw[outside] - anchor.y[outside]
+    dy[outside]     <- w[outside] - anchor.y[outside]
+    
+    ans$extrapolation <- data.frame(
+      x = xout,
+      side = ifelse(left, "left", ifelse(right, "right", "none")),
+      extrapolated = outside,
+      anchor.x = anchor.x,
+      anchor.y = anchor.y,
+      slope = slope,
+      x.change = dx,
+      x.distance = abs(dx),
+      y.change.raw = dy.raw,
+      y.change = dy,
+      raw.value = raw,
+      value = w,
+      clipping.correction = w - raw,
+      clipped = ifelse(is.na(w) | is.na(raw), NA, w != raw)
+    )
+  }
+  
+  ans
+  #ADDED END
+  #OLD CODE:
+  # r <- range(x)
+  # d <- xout < r[1]
+  # if(any(is.na(d)))
+  #   stop('NAs not allowed in xout')
+  # 
+  # if(any(d))
+  #   w[d] <- (y[2]-y[1])/(x[2]-x[1])*(xout[d]-x[1])+y[1]
+  # 
+  # d <- xout > r[2]
+  # n <- length(y)
+  # if(any(d))
+  #   w[d] <- (y[n]-y[n-1])/(x[n]-x[n-1])*(xout[d]-x[n-1])+y[n-1]
+  # 
+  # if(length(curtail) == 2)
+  #   w[d] <- pmax(curtail[1], pmin(w[d], curtail[2]))
+  # list(x=xout, y=w)
 }
 
 
