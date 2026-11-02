@@ -19,7 +19,7 @@ movStats(
   msmooth = c("smoothed", "raw", "both"),
   tsmooth = c("supsmu", "lowess"),
   bass = 8,
-  span = 1/4,
+  span = 0.1,
   maxdim = 6,
   penalty = NULL,
   trans = function(x) x,
@@ -37,7 +37,8 @@ movStats(
   tau = (1:3)/4,
   melt = FALSE,
   data = environment(formula),
-  pr = c("none", "kable", "plain", "margin")
+  pr = c("none", "kable", "plain", "margin"),
+  rho = 0.5
 )
 }
 \arguments{
@@ -55,7 +56,13 @@ movStats(
 
 \item{nignore}{see description, default is to exclude \code{nignore=10} points on the left and right tails from estimation and plotting}
 
-\item{xinc}{increment in x to evaluate stats, default is xlim range/100 for \code{space='x'}.  For \code{space='n'} \code{xinc} defaults to m observations, where m = max(n/200, 1).}
+\item{xinc}{Increment between evaluation targets. For \code{space='n'}, the increment is measured in observation ranks and is calculated separately for each stratum. When omitted, the increment is \code{max(floor(n / 200), 1)}, capped by the overlap requirement specified by \code{rho}. An explicitly supplied value bypasses this cap. For \code{space='x'}, the default is the \code{xlim} range divided by 100.}
+
+\item{rho}{Requested minimum fraction of observations shared by consecutive full rank windows when automatic spacing is used with \code{space='n'} and \code{varyeps=FALSE}. Defaults to \code{0.5}. Must be one finite numeric value strictly between zero and one. The overlap requirement must permit an increment of at least one observation. Integer rounding can produce greater overlap than requested, subject to a small numerical tolerance. An explicit \code{xinc} bypasses the overlap cap and its attainability check, but basic validation of \code{rho} still applies.}
+
+\item{bass}{Smoothness control for adaptive \code{supsmu} span selection. Defaults to \code{8} represents quite heavy smoothing.. Has no effect when a positive fixed \code{span} is supplied.}
+
+\item{span}{Smoothing fraction applied to the moving estimates. Defaults to \code{0.1}. For \code{tsmooth='supsmu'}, a value satisfying \code{0 < span <= 1} selects fixed-span smoothing; when \code{span=0} and \code{tsmooth='supsmu'}, the span is selected adaptively using leave-one-out cross-validation. Overlapping windows share observations, so their moving estimates (including Kaplan-Meier estimates for survival outcomes) are dependent. Leaving out one moving estimate does not remove its contributing observations from neighboring windows. Consequently, cross-validation may give a misleading assessment of smoothing error and affect span selection. The fraction refers to the moving estimates supplied to the smoother, not the original observations or a fixed distance along the predictor. For \code{tsmooth='lowess'}, this argument is passed as \code{f}. Not used when \code{msmooth='raw'}.}
 
 \item{xlim}{2-vector of limits to evaluate if \code{space='x'} (default is \code{nignore} smallest to \code{nignore} largest)}
 
@@ -63,13 +70,9 @@ movStats(
 
 \item{tunits}{time units when \code{times} is given}
 
-\item{msmooth}{set to \code{'smoothed'} or \code{'both'} to compute \code{lowess}-smooth moving estimates. \code{msmooth='both'} will display both.  \code{'raw'} will display only the moving statistics.  \code{msmooth='smoothed'} (the default) will display only he smoothed moving estimates.}
+\item{msmooth}{set to \code{'smoothed'} or \code{'both'} to compute smoothed moving estimates. \code{msmooth='both'} will display both.  \code{'raw'} will display only the moving statistics.  \code{msmooth='smoothed'} (the default) will display only he smoothed moving estimates.}
 
 \item{tsmooth}{defaults to the super-smoother \code{'supsmu'} for after-moving smoothing.  Use \code{tsmooth='lowess'} to instead use \code{lowess}.}
-
-\item{bass}{the \code{supsmu} \code{bass} parameter used to smooth the moving statistics if \code{tsmooth='supsmu'}.  The default of 8 represents quite heavy smoothing.}
-
-\item{span}{the \code{lowess} \code{span} used to smooth the moving statistics}
 
 \item{maxdim}{passed to \code{hare}, default is 6}
 
